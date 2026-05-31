@@ -58,6 +58,52 @@ class JEPA(nn.Module):
     ## Inference only ##
     ####################
 
+    def _rollout_truncation(self, emb, act, act_future, n_steps, history_size):
+        """Stateless rollout using truncated history window."""
+        HS = history_size
+        for t in range(n_steps):
+            act_emb = self.action_encoder(act)
+            emb_trunc = emb[:, -HS:]
+            act_trunc = act_emb[:, -HS:]
+            pred_emb = self.predict(emb_trunc, act_trunc)[:, -1:]
+            emb = torch.cat([emb, pred_emb], dim=1)
+
+            next_act = act_future[:, t : t + 1, :]
+            act = torch.cat([act, next_act], dim=1)
+
+        # predict the last state
+        act_emb = self.action_encoder(act)
+        emb_trunc = emb[:, -HS:]
+        act_trunc = act_emb[:, -HS:]
+        pred_emb = self.predict(emb_trunc, act_trunc)[:, -1:]
+        emb = torch.cat([emb, pred_emb], dim=1)
+        return emb
+
+    def _rollout_stateful(self, emb, act, act_future, n_steps, history_size):
+        """Stateful rollout using Mamba's step API — O(1) per step."""
+        HS = history_size
+        # build initial state by processing context step by step
+        state = None
+        for t in range(HS):
+            emb_t = emb[:, t : t + 1]
+            act_t = act[:, t : t + 1]
+            act_emb_t = self.action_encoder(act_t)
+            _, state = self.predictor.step(emb_t, act_emb_t, state)
+
+        for t in range(n_steps):
+            act_emb = self.action_encoder(act[:, -1:])
+            pred_emb, state = self.predictor.step(emb[:, -1:], act_emb, state)
+            emb = torch.cat([emb, pred_emb], dim=1)
+
+            next_act = act_future[:, t : t + 1, :]
+            act = torch.cat([act, next_act], dim=1)
+
+        # predict the last state
+        act_emb = self.action_encoder(act[:, -1:])
+        pred_emb, _ = self.predictor.step(emb[:, -1:], act_emb, state)
+        emb = torch.cat([emb, pred_emb], dim=1)
+        return emb
+
     def rollout(self, info, action_sequence, history_size: int = 3):
         """Rollout the model given an initial info dict and action sequence.
         pixels: (B, S, T, C, H, W)
@@ -84,24 +130,11 @@ class JEPA(nn.Module):
         act = rearrange(act_0, "b s ... -> (b s) ...")
         act_future = rearrange(act_future, "b s ... -> (b s) ...")
 
-        # rollout predictor autoregressively for n_steps
-        HS = history_size
-        for t in range(n_steps):
-            act_emb = self.action_encoder(act)
-            emb_trunc = emb[:, -HS:]  # (BS, HS, D)
-            act_trunc = act_emb[:, -HS:]  # (BS, HS, A_emb)
-            pred_emb = self.predict(emb_trunc, act_trunc)[:, -1:]  # (BS, 1, D)
-            emb = torch.cat([emb, pred_emb], dim=1)  # (BS, T+1, D)
-
-            next_act = act_future[:, t : t + 1, :]  # (BS, 1, action_dim)
-            act = torch.cat([act, next_act], dim=1)  # (BS, T+1, action_dim)
-
-        # predict the last state
-        act_emb = self.action_encoder(act)  # (BS, T, A_emb)
-        emb_trunc = emb[:, -HS:]  # (BS, HS, D)
-        act_trunc = act_emb[:, -HS:]  # (BS, HS, A_emb)
-        pred_emb = self.predict(emb_trunc, act_trunc)[:, -1:]  # (BS, 1, D)
-        emb = torch.cat([emb, pred_emb], dim=1)
+        # use stateful rollout if predictor supports step(), else truncation
+        if hasattr(self.predictor, 'step'):
+            emb = self._rollout_stateful(emb, act, act_future, n_steps, history_size)
+        else:
+            emb = self._rollout_truncation(emb, act, act_future, n_steps, history_size)
 
         # unflatten batch and sample dimensions
         pred_rollout = rearrange(emb, "(b s) ... -> b s ...", b=B, s=S)
