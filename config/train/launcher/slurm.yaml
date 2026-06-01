@@ -1,0 +1,29 @@
+# @package _global_
+# SLURM launcher via hydra-submitit-launcher
+#
+# Usage:
+#   python train.py launcher=slurm model=lewm_deltanet data=pusht
+#
+# Or override params on the CLI:
+#   python train.py launcher=slurm model=lewm_deltanet \
+#       'launcher.partition=bigpu' launcher.timeout_min=2880
+
+defaults:
+  - override /hydra/launcher: submitit_slurm
+
+partition: gpu
+qos: null
+timeout_min: 1440
+nodes: 1
+tasks_per_node: 1
+gpus_per_node: 1
+cpus_per_task: 8
+mem_gb: 64
+name: ${output_model_name}
+max_num_timeout: 3
+stderr_to_stdout: true
+additional_parameters: {}
+setup:
+  - source .venv/bin/activate
+  - export STABLEWM_HOME=$PWD/data
+  - mkdir -p $STABLEWM_HOME

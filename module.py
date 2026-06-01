@@ -285,6 +285,7 @@ class ARPredictor(nn.Module):
         x = self.transformer(x, c)
         return x
 
+##################################################################################
 
 class DeltaNetAttention(nn.Module):
     """Linear attention via delta rule (Yang et al., 2024). O(T) instead of O(T²).
