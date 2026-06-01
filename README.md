@@ -36,6 +36,15 @@ source .venv/bin/activate
 uv pip install stable-worldmodel[train,env]
 ```
 
+Or with plain pip:
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Optional: GPU kernels for Mamba/DeltaNet (needs nvcc, e.g. on Colab)
+pip install --no-build-isolation -r requirements-cuda.txt
+```
+
 ## Data
 
 Datasets use the HDF5 format for fast loading. Download the data from [HuggingFace](https://huggingface.co/collections/quentinll/lewm) and decompress with:

@@ -1,0 +1,35 @@
+# LeWorldModel — Python dependencies
+# ------------------------------------------------------------
+# Install everything needed for training/benchmarking:
+#     pip install -r requirements.txt
+#     pip install -r requirements-cuda.txt   # optional GPU kernels
+#
+# Equivalent to the README's `uv pip install stable-worldmodel[train,env]`
+# but spelled out for plain pip users.
+# ------------------------------------------------------------
+
+# Core training stack (the [train] extra of stable-worldmodel)
+# Pulls in: transformers, stable-pretraining, hydra-core, hydra-submitit-launcher, wandb
+stable-worldmodel[train]
+
+# Lance data format (for swm.data.load_dataset / swm.data.convert)
+# These are also pulled by stable-worldmodel base, but pinned here for clarity.
+lancedb>=0.30.0
+pylance>=4.0.0
+pyarrow
+
+# HDF5 support (for reading the .h5.zst PushT dataset and converting to lance)
+h5py
+hdf5plugin
+
+# Zstandard decompression (for unpacking HuggingFace *.h5.zst archives)
+zstandard
+
+# Misc utilities
+einops
+tqdm
+pillow
+loguru
+rich
+typer
+gymnasium
