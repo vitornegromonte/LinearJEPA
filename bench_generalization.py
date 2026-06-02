@@ -326,6 +326,131 @@ def evaluate_rollout(predictor, act_encoder, data, eval_len, history_size=3,
     )
 
 
+# ─── Speed benchmarking ────────────────────────────────────────────────
+
+def bench_speed(models, lengths, batch_size=64, embed_dim=192,
+                history_size=3, n_warmup=5, n_trials=50, device=DEVICE):
+    """Benchmark forward pass + autoregressive rollout speed.
+
+    For each (model, T) pair, measures:
+      - forward_ms: time for one forward() call at length T (batch_size=batch_size)
+      - forward_tok_s: tokens processed per second (batch_size * T / forward_sec)
+      - rollout_ms_per_step: time for one autoregressive step
+      - peak_memory_mb: peak GPU memory during forward (0 on CPU)
+
+    Also estimates asymptotic complexity factor:
+      - O(T) ~ constant tokens_per_sec across lengths → linear
+      - O(T^2) ~ tokens_per_sec halves when T doubles → quadratic
+    """
+    print(f"\n{'='*60}")
+    print(f"  Speed benchmark  |  batch_size={batch_size}  embed_dim={embed_dim}")
+    print(f"{'='*60}")
+
+    results = []
+
+    for model_name in models:
+        print(f"\n  --- {model_name} ---")
+
+        predictor = make_predictor(
+            model_name, input_dim=embed_dim, hidden_dim=embed_dim,
+            output_dim=embed_dim, history_size=history_size,
+        )
+        predictor.to(device)
+        predictor.eval()
+
+        # Count parameters
+        n_params = sum(p.numel() for p in predictor.parameters())
+        n_trainable = sum(p.numel() for p in predictor.parameters() if p.requires_grad)
+        print(f"    Params: {n_params:,} ({n_trainable:,} trainable)")
+
+        for T in lengths:
+            x = torch.randn(batch_size, T, embed_dim, device=device)
+            c = torch.randn(batch_size, T, embed_dim, device=device)
+
+            # Warmup
+            for _ in range(n_warmup):
+                _ = predictor(x, c)
+
+            # Timed forward trials (no_grad to avoid autograd overhead)
+            torch.cuda.synchronize(device) if device != "cpu" else None
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                for _ in range(n_trials):
+                    out = predictor(x, c)
+            torch.cuda.synchronize(device) if device != "cpu" else None
+            t1 = time.perf_counter()
+
+            total_ms = (t1 - t0) * 1000
+            ms_per_call = total_ms / n_trials
+            ms_per_tok = ms_per_call / (batch_size * T)
+            tok_per_s = (batch_size * T) / (total_ms / 1000 / n_trials)
+
+            # Rollout step speed (simulates autoregressive generation)
+            # Fixed context of history_size steps, predict one step ahead
+            x_ctx = torch.randn(batch_size, history_size, embed_dim, device=device)
+            c_ctx = torch.randn(batch_size, history_size, embed_dim, device=device)
+
+            # Use step() if available, else forward() with truncation
+            has_step = hasattr(predictor, "step") and model_name == "lewm_mamba"
+
+            if has_step:
+                # Build initial state
+                state = None
+                for _ in range(history_size):
+                    _, state = predictor.step(x_ctx[:, -1:], c_ctx[:, -1:], state)
+
+                for _ in range(n_warmup):
+                    _, state = predictor.step(x_ctx[:, -1:], c_ctx[:, -1:], state)
+
+                torch.cuda.synchronize(device) if device != "cpu" else None
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    for _ in range(n_trials):
+                        _, state = predictor.step(x_ctx[:, -1:], c_ctx[:, -1:], state)
+                torch.cuda.synchronize(device) if device != "cpu" else None
+                t1 = time.perf_counter()
+            else:
+                # Stateless: re-encode full context each step
+                for _ in range(n_warmup):
+                    _ = predictor(x_ctx, c_ctx)
+
+                torch.cuda.synchronize(device) if device != "cpu" else None
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    for _ in range(n_trials):
+                        _ = predictor(x_ctx, c_ctx)
+                torch.cuda.synchronize(device) if device != "cpu" else None
+                t1 = time.perf_counter()
+
+            rollout_ms = (t1 - t0) * 1000 / n_trials
+
+            # Peak memory
+            mem_mb = 0
+            if device != "cpu":
+                mem_mb = torch.cuda.max_memory_allocated(device) / 1e6
+                torch.cuda.reset_peak_memory_stats(device)
+
+            print(f"    T={T:4d}  "
+                  f"forward={ms_per_call:8.2f}ms  "
+                  f"tok/s={tok_per_s:10.0f}  "
+                  f"rollout_step={rollout_ms:7.2f}ms"
+                  f"{'  mem=' + f'{mem_mb:.0f}MB' if mem_mb else ''}{'  ★' if has_step else ''}")
+
+            results.append(dict(
+                model=model_name,
+                seq_len=T,
+                forward_ms=round(ms_per_call, 2),
+                forward_tok_s=round(tok_per_s, 0),
+                ms_per_tok=round(ms_per_tok, 6),
+                rollout_step_ms=round(rollout_ms, 3),
+                params=n_params,
+                trainable_params=n_trainable,
+                peak_memory_mb=round(mem_mb, 0),
+            ))
+
+    return results
+
+
 # ─── Main sweep ────────────────────────────────────────────────────────
 
 def run_benchmark(args):
@@ -336,13 +461,29 @@ def run_benchmark(args):
     eval_lens = [int(x) for x in args.eval_lens.split(",")]
     seeds = args.seeds
 
-    fieldnames = [
+    accuracy_fieldnames = [
         "task", "modality", "model", "loss", "seed",
         "eval_len", "first_div_step", "mean_mse", "final_mse",
         "train_time_s",
     ]
-    results = []
+    speed_fieldnames = [
+        "benchmark", "model", "seq_len", "forward_ms", "forward_tok_s",
+        "ms_per_tok", "rollout_step_ms", "params", "trainable_params",
+        "peak_memory_mb",
+    ]
+    results_accuracy = []
+    results_speed = []
 
+    # ── Speed benchmark (runs once per model, before training) ─────────
+    if args.bench_speed:
+        speed_lens = [int(x) for x in args.speed_lens.split(",")]
+        spd = bench_speed(
+            models, speed_lens,
+            batch_size=args.batch_size, n_trials=args.speed_trials,
+        )
+        results_speed.extend(spd)
+
+    # ── Accuracy / generalization benchmark ────────────────────────────
     for task in tasks:
         for seed in range(seeds):
             print(f"\n{'='*60}")
@@ -405,7 +546,7 @@ def run_benchmark(args):
                               f"first_div={metrics['first_div_step']:4d}  "
                               f"mean_mse={metrics['mean_mse']:.6f}")
 
-                        results.append(dict(
+                        results_accuracy.append(dict(
                             task=task,
                             modality=args.modality,
                             model=model_name,
@@ -423,12 +564,17 @@ def run_benchmark(args):
     if out_path:
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         with open(out_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=accuracy_fieldnames)
             writer.writeheader()
-            writer.writerows(results)
+            writer.writerows(results_accuracy)
+            f.write("\n")
+            if results_speed:
+                writer = csv.DictWriter(f, fieldnames=speed_fieldnames)
+                writer.writeheader()
+                writer.writerows(results_speed)
         print(f"\nResults written to {out_path}")
 
-    return results
+    return results_accuracy, results_speed
 
 
 if __name__ == "__main__":
@@ -452,6 +598,14 @@ if __name__ == "__main__":
     parser.add_argument("--seeds", type=int, default=3)
     parser.add_argument("--out", default="results/benchmark.csv",
                         help="Output CSV path")
+    parser.add_argument("--bench-speed", action="store_true",
+                        help="Benchmark forward pass and rollout speed")
+    parser.add_argument("--speed-lens", default="16,32,64,128,256,512",
+                        help="Comma-separated sequence lengths for speed bench")
+    parser.add_argument("--batch-size", type=int, default=64,
+                        help="Batch size for speed benchmark")
+    parser.add_argument("--speed-trials", type=int, default=50,
+                        help="Number of trials per speed measurement")
 
     args = parser.parse_args()
-    run_benchmark(args)
+    res_acc, res_spd = run_benchmark(args)

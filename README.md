@@ -118,6 +118,16 @@ Compare how the three predictors handle training/eval length mismatches, long-ra
 # Full sweep: 5 tasks × 2 loss modes × 3 seeds
 python bench_generalization.py --out results/benchmark.csv
 
+# Include speed benchmarking (forward latency, rollout step speed, memory)
+python bench_generalization.py --bench-speed --out results/benchmark.csv
+
+# Speed-only vs accuracy: control sequence lengths and batch size
+python bench_generalization.py --bench-speed \
+    --speed-lens 16,32,64,128,256 \
+    --batch-size 128 --speed-trials 100 \
+    --task linear_ar --models lewm,lewm_deltanet,lewm_mamba \
+    --episodes 50 --steps 200 --seeds 1
+
 # Custom run
 python bench_generalization.py \
     --task nback,delayed_copy \
@@ -128,7 +138,10 @@ python bench_generalization.py \
     --episodes 200 --steps 2000 --seeds 3
 ```
 
-Output is a CSV with columns: `task, model, loss, seed, eval_len, first_div_step, mean_mse`.
+Output is a CSV with accuracy columns: `task, model, loss, seed, eval_len, first_div_step, mean_mse`.
+With `--bench-speed`, an additional speed table is appended with columns:
+`model, seq_len, forward_ms, forward_tok_s, ms_per_tok, rollout_step_ms, params, peak_memory_mb`.
+Mamba's `step()`-based rollout is flagged `★` in the terminal output.
 
 ## Pretrained Checkpoints
 
