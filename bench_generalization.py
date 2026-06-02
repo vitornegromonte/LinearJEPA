@@ -459,9 +459,14 @@ def bench_speed(models, lengths, batch_size=64, embed_dim=192,
             x = torch.randn(batch_size, T, embed_dim, device=device)
             c = torch.randn(batch_size, T, embed_dim, device=device)
 
-            # Warmup
-            for _ in range(n_warmup):
-                _ = predictor(x, c)
+            # Warmup (no_grad prevents autograd memory blowup in DeltaNet fallback)
+            torch.cuda.synchronize(device) if device != "cpu" else None
+            with torch.no_grad():
+                for _ in range(n_warmup):
+                    _ = predictor(x, c)
+            torch.cuda.synchronize(device) if device != "cpu" else None
+            if device != "cpu":
+                torch.cuda.empty_cache()
 
             # Timed forward trials (no_grad to avoid autograd overhead)
             torch.cuda.synchronize(device) if device != "cpu" else None
@@ -488,11 +493,12 @@ def bench_speed(models, lengths, batch_size=64, embed_dim=192,
             if has_step:
                 # Build initial state
                 state = None
-                for _ in range(ctx_size):
-                    _, state = predictor.step(x_ctx[:, -1:], c_ctx[:, -1:], state)
+                with torch.no_grad():
+                    for _ in range(ctx_size):
+                        _, state = predictor.step(x_ctx[:, -1:], c_ctx[:, -1:], state)
 
-                for _ in range(n_warmup):
-                    _, state = predictor.step(x_ctx[:, -1:], c_ctx[:, -1:], state)
+                    for _ in range(n_warmup):
+                        _, state = predictor.step(x_ctx[:, -1:], c_ctx[:, -1:], state)
 
                 torch.cuda.synchronize(device) if device != "cpu" else None
                 t0 = time.perf_counter()
@@ -503,8 +509,9 @@ def bench_speed(models, lengths, batch_size=64, embed_dim=192,
                 t1 = time.perf_counter()
             else:
                 # Stateless: re-encode full context each step
-                for _ in range(n_warmup):
-                    _ = predictor(x_ctx, c_ctx)
+                with torch.no_grad():
+                    for _ in range(n_warmup):
+                        _ = predictor(x_ctx, c_ctx)
 
                 torch.cuda.synchronize(device) if device != "cpu" else None
                 t0 = time.perf_counter()
@@ -521,6 +528,10 @@ def bench_speed(models, lengths, batch_size=64, embed_dim=192,
             if device != "cpu":
                 mem_mb = torch.cuda.max_memory_allocated(device) / 1e6
                 torch.cuda.reset_peak_memory_stats(device)
+
+            # Clear cached allocator between length sweeps
+            if device != "cpu":
+                torch.cuda.empty_cache()
 
             print(f"    T={T:4d}  "
                   f"forward={ms_per_call:8.2f}ms  "
@@ -540,6 +551,11 @@ def bench_speed(models, lengths, batch_size=64, embed_dim=192,
                 trainable_params=n_trainable,
                 peak_memory_mb=round(mem_mb, 0),
             ))
+
+        # Free GPU memory before next model
+        if device != "cpu":
+            del predictor
+            torch.cuda.empty_cache()
 
     return results
 
@@ -696,7 +712,7 @@ if __name__ == "__main__":
                         help="Benchmark forward pass and rollout speed")
     parser.add_argument("--speed-lens", default="16,32,64,128,256,512",
                         help="Comma-separated sequence lengths for speed bench")
-    parser.add_argument("--batch-size", type=int, default=64,
+    parser.add_argument("--batch-size", type=int, default=32,
                         help="Batch size for speed benchmark")
     parser.add_argument("--speed-trials", type=int, default=50,
                         help="Number of trials per speed measurement")
