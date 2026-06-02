@@ -25,19 +25,51 @@ DATASETS = {
     "cube": ("quentinll/lewm-cube", "cube_single_expert.tar.zst"),
 }
 
+# Synthetic datasets — generated locally, not downloaded from HF
+SYNTH_TASKS = ["linear_ar", "nback", "delayed_copy", "slowfast", "chaotic"]
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Download LeWM dataset")
-    parser.add_argument("dataset", choices=list(DATASETS), help="Dataset name")
+    parser = argparse.ArgumentParser(description="Download or generate LeWM dataset")
+    all_choices = list(DATASETS) + SYNTH_TASKS
+    parser.add_argument("dataset", choices=all_choices, help="Dataset name; synth tasks: " + ", ".join(SYNTH_TASKS))
     parser.add_argument(
         "--home", default=None,
         help="STABLEWM_HOME (default: $STABLEWM_HOME or $PWD/data)",
     )
+    parser.add_argument("--modality", default="state", choices=["state", "image", "both"])
+    parser.add_argument("--num-episodes", type=int, default=1000)
+    parser.add_argument("--ep-len", type=int, default=100)
+    parser.add_argument("--image-size", type=int, default=64)
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
     home = args.home or os.environ.get("STABLEWM_HOME",
                                        os.path.join(os.getcwd(), "data"))
     os.makedirs(home, exist_ok=True)
+
+    # Synthetic dataset — generate locally
+    if args.dataset in SYNTH_TASKS:
+        from synth_data.cli import main as synth_main
+        synth_argv = [
+            "synth_data.py",
+            f"--task={args.dataset}",
+            f"--modality={args.modality}",
+            f"--num-episodes={args.num_episodes}",
+            f"--ep-len={args.ep_len}",
+            f"--image-size={args.image_size}",
+            f"--seed={args.seed}",
+            f"--out={os.path.join(home, f'synth_{args.dataset}.h5')}",
+        ]
+        import sys as _sys
+        _old_argv, _sys.argv = _sys.argv, synth_argv
+        try:
+            synth_main()
+        finally:
+            _sys.argv = _old_argv
+        return
+
+    # Standard dataset — download from HF
     repo_id, archive_name = DATASETS[args.dataset]
     stem = archive_name.replace(".tar.zst", "").replace(".h5.zst", "")
     h5_path = os.path.join(home, f"{stem}.h5")

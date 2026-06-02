@@ -93,6 +93,43 @@ python eval.py --config-name=pusht.yaml policy=pusht/lewm
 python eval.py --config-name=pusht.yaml policy=pusht/lewm_object.ckpt
 ```
 
+## Synthetic Benchmarks
+
+Generate synthetic data to stress-test predictor architectures (Transformer, DeltaNet, Mamba) on controlled dynamics:
+
+```bash
+# Generate a synthetic linear AR dataset (state modality, 200 episodes)
+python synth_data.py --task linear_ar --modality state --num-episodes 200 --ep-len 128
+
+# Train on it
+python train.py data=synth model=lewm_deltanet data.name=synth_linear_ar.h5 wandb.enabled=False
+
+# Customize hyperparameters
+python synth_data.py --task nback --modality image --image-size 64 --n-back 5 --num-episodes 500
+```
+
+Available tasks: `linear_ar`, `nback`, `delayed_copy`, `slowfast`, `chaotic`.
+
+### Step-Generalization Benchmark
+
+Compare how the three predictors handle training/eval length mismatches, long-range memory, and rollout quality:
+
+```bash
+# Full sweep: 5 tasks × 2 loss modes × 3 seeds
+python bench_generalization.py --out results/benchmark.csv
+
+# Custom run
+python bench_generalization.py \
+    --task nback,delayed_copy \
+    --modality state \
+    --train-len 16 --eval-lens 16,32,64,128 \
+    --models lewm,lewm_deltanet,lewm_mamba \
+    --loss lewm,jepa \
+    --episodes 200 --steps 2000 --seeds 3
+```
+
+Output is a CSV with columns: `task, model, loss, seed, eval_len, first_div_step, mean_mse`.
+
 ## Pretrained Checkpoints
 
 Pretrained LeWM checkpoints for each environment are mirrored on the Hugging Face

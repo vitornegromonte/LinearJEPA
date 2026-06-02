@@ -1,0 +1,10 @@
+
+# Benchmark output
+results/
+
+# Byte-compiled
+__pycache__/
+*.pyc
+
+# Synthetic data (generated locally at root)
+/data/
