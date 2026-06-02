@@ -128,6 +128,11 @@ python bench_generalization.py --bench-speed \
     --task linear_ar --models lewm,lewm_deltanet,lewm_mamba \
     --episodes 50 --steps 200 --seeds 1
 
+# Fair speed comparison: scale depths so all models have ~same param count
+python bench_generalization.py --bench-speed --match-params \
+    --speed-lens 16,32,64,128,256 \
+    --task linear_ar --episodes 50 --steps 200 --seeds 1
+
 # Custom run
 python bench_generalization.py \
     --task nback,delayed_copy \
@@ -140,8 +145,10 @@ python bench_generalization.py \
 
 Output is a CSV with accuracy columns: `task, model, loss, seed, eval_len, first_div_step, mean_mse`.
 With `--bench-speed`, an additional speed table is appended with columns:
-`model, seq_len, forward_ms, forward_tok_s, ms_per_tok, rollout_step_ms, params, peak_memory_mb`.
+`model, seq_len, forward_ms, forward_tok_s, ms_per_tok, rollout_step_ms, depth, params, peak_memory_mb`.
 Mamba's `step()`-based rollout is flagged `★` in the terminal output.
+With `--match-params`, model depths are scaled so all have similar param counts
+(fairer compute comparison; e.g. Mamba gets ~51 layers vs Transformer's 6).
 
 ## Pretrained Checkpoints
 

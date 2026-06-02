@@ -328,8 +328,73 @@ def evaluate_rollout(predictor, act_encoder, data, eval_len, history_size=3,
 
 # ─── Speed benchmarking ────────────────────────────────────────────────
 
+def _estimate_param_matched_depths(models, input_dim=192, hidden_dim=192,
+                                   output_dim=192, heads=16, dim_head=64,
+                                   mlp_dim=2048, history_size=3):
+    """Estimate depth for each model to match the param count of the first model at depth=6.
+
+    Builds depth=1 and depth=2 versions of each architecture to compute
+    per-block params, then solves for the depth needed to reach the target.
+
+    Returns dict {model_name: depth}.
+    """
+    from module import ARPredictor, ConditionalBlock, DeltaNetConditionalBlock, MambaPredictor
+
+    # Reference = first model at depth=6
+    ref_model = models[0]
+    ref_kwargs = dict(
+        num_frames=history_size, depth=6,
+        input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim,
+        heads=heads, dim_head=dim_head, mlp_dim=mlp_dim,
+        dropout=0.0,
+    )
+    if ref_model == "lewm_mamba":
+        ref = MambaPredictor(**ref_kwargs, d_state=16, d_conv=4, expand=2, emb_dropout=0.0)
+    else:
+        bc = ConditionalBlock if ref_model == "lewm" else DeltaNetConditionalBlock
+        ref = ARPredictor(**ref_kwargs, emb_dropout=0.0, block_class=bc)
+    target = sum(p.numel() for p in ref.parameters())
+    print(f"    Reference: {ref_model} depth=6 → {target:,} params")
+
+    depths = {}
+    for model_name in models:
+        if model_name == "lewm_mamba":
+            base = MambaPredictor(num_frames=history_size, depth=1,
+                                  input_dim=input_dim, hidden_dim=hidden_dim,
+                                  output_dim=output_dim, d_state=16, d_conv=4,
+                                  expand=2, dropout=0.0, emb_dropout=0.0)
+            top = MambaPredictor(num_frames=history_size, depth=2,
+                                 input_dim=input_dim, hidden_dim=hidden_dim,
+                                 output_dim=output_dim, d_state=16, d_conv=4,
+                                 expand=2, dropout=0.0, emb_dropout=0.0)
+        else:
+            bc = ConditionalBlock if model_name == "lewm" else DeltaNetConditionalBlock
+            base = ARPredictor(num_frames=history_size, depth=1,
+                               input_dim=input_dim, hidden_dim=hidden_dim,
+                               output_dim=output_dim, heads=heads,
+                               dim_head=dim_head, mlp_dim=mlp_dim,
+                               dropout=0.0, emb_dropout=0.0, block_class=bc)
+            top = ARPredictor(num_frames=history_size, depth=2,
+                              input_dim=input_dim, hidden_dim=hidden_dim,
+                              output_dim=output_dim, heads=heads,
+                              dim_head=dim_head, mlp_dim=mlp_dim,
+                              dropout=0.0, emb_dropout=0.0, block_class=bc)
+
+        p1 = sum(p.numel() for p in base.parameters())
+        p2 = sum(p.numel() for p in top.parameters())
+        per_block = p2 - p1
+        base_overhead = p1 - per_block
+        d = max(1, round((target - base_overhead) / per_block))
+        depths[model_name] = d
+        print(f"    {model_name}: base={base_overhead:,}  per_block={per_block:,}"
+              f"  → depth={d} ({p1 + (d-1)*per_block:,} params)")
+
+    return depths
+
+
 def bench_speed(models, lengths, batch_size=64, embed_dim=192,
-                history_size=3, n_warmup=5, n_trials=50, device=DEVICE):
+                history_size=None, n_warmup=5, n_trials=50,
+                match_params=False, device=DEVICE):
     """Benchmark forward pass + autoregressive rollout speed.
 
     For each (model, T) pair, measures:
@@ -338,23 +403,50 @@ def bench_speed(models, lengths, batch_size=64, embed_dim=192,
       - rollout_ms_per_step: time for one autoregressive step
       - peak_memory_mb: peak GPU memory during forward (0 on CPU)
 
-    Also estimates asymptotic complexity factor:
-      - O(T) ~ constant tokens_per_sec across lengths → linear
-      - O(T^2) ~ tokens_per_sec halves when T doubles → quadratic
+    If match_params is True, scales each model's depth so all have roughly
+    the same parameter count as the first model at its default depth of 6.
     """
     print(f"\n{'='*60}")
     print(f"  Speed benchmark  |  batch_size={batch_size}  embed_dim={embed_dim}")
     print(f"{'='*60}")
 
     results = []
+    ctx_size = 3  # autoregressive context window (not the model's history_size)
+
+    # Param matching: compute depths so all models have similar param counts
+    if match_params:
+        depth_map = _estimate_param_matched_depths(
+            models, input_dim=embed_dim, hidden_dim=embed_dim,
+            output_dim=embed_dim,
+        )
+    else:
+        depth_map = None
 
     for model_name in models:
         print(f"\n  --- {model_name} ---")
 
-        predictor = make_predictor(
-            model_name, input_dim=embed_dim, hidden_dim=embed_dim,
-            output_dim=embed_dim, history_size=history_size,
-        )
+        # ARPredictor has a fixed pos_embedding sized by history_size.
+        # Use the max test length so all T values fit.
+        hsize = history_size or max(lengths)
+
+        # Determine depth (possibly param-matched)
+        depth = depth_map[model_name] if depth_map else 6
+
+        if model_name == "lewm_mamba":
+            predictor = MambaPredictor(
+                num_frames=hsize, depth=depth,
+                input_dim=embed_dim, hidden_dim=embed_dim,
+                output_dim=embed_dim,
+                d_state=16, d_conv=4, expand=2, dropout=0.1, emb_dropout=0.0,
+            )
+        else:
+            bc = ConditionalBlock if model_name == "lewm" else DeltaNetConditionalBlock
+            predictor = ARPredictor(
+                num_frames=hsize, depth=depth, heads=16, mlp_dim=2048,
+                input_dim=embed_dim, hidden_dim=embed_dim,
+                output_dim=embed_dim, dim_head=64,
+                dropout=0.1, emb_dropout=0.0, block_class=bc,
+            )
         predictor.to(device)
         predictor.eval()
 
@@ -386,9 +478,9 @@ def bench_speed(models, lengths, batch_size=64, embed_dim=192,
             tok_per_s = (batch_size * T) / (total_ms / 1000 / n_trials)
 
             # Rollout step speed (simulates autoregressive generation)
-            # Fixed context of history_size steps, predict one step ahead
-            x_ctx = torch.randn(batch_size, history_size, embed_dim, device=device)
-            c_ctx = torch.randn(batch_size, history_size, embed_dim, device=device)
+            # Fixed context of ctx_size steps, predict one step ahead
+            x_ctx = torch.randn(batch_size, ctx_size, embed_dim, device=device)
+            c_ctx = torch.randn(batch_size, ctx_size, embed_dim, device=device)
 
             # Use step() if available, else forward() with truncation
             has_step = hasattr(predictor, "step") and model_name == "lewm_mamba"
@@ -396,7 +488,7 @@ def bench_speed(models, lengths, batch_size=64, embed_dim=192,
             if has_step:
                 # Build initial state
                 state = None
-                for _ in range(history_size):
+                for _ in range(ctx_size):
                     _, state = predictor.step(x_ctx[:, -1:], c_ctx[:, -1:], state)
 
                 for _ in range(n_warmup):
@@ -443,6 +535,7 @@ def bench_speed(models, lengths, batch_size=64, embed_dim=192,
                 forward_tok_s=round(tok_per_s, 0),
                 ms_per_tok=round(ms_per_tok, 6),
                 rollout_step_ms=round(rollout_ms, 3),
+                depth=depth,
                 params=n_params,
                 trainable_params=n_trainable,
                 peak_memory_mb=round(mem_mb, 0),
@@ -468,7 +561,7 @@ def run_benchmark(args):
     ]
     speed_fieldnames = [
         "benchmark", "model", "seq_len", "forward_ms", "forward_tok_s",
-        "ms_per_tok", "rollout_step_ms", "params", "trainable_params",
+        "ms_per_tok", "rollout_step_ms", "depth", "params", "trainable_params",
         "peak_memory_mb",
     ]
     results_accuracy = []
@@ -480,6 +573,7 @@ def run_benchmark(args):
         spd = bench_speed(
             models, speed_lens,
             batch_size=args.batch_size, n_trials=args.speed_trials,
+            match_params=args.match_params,
         )
         results_speed.extend(spd)
 
@@ -606,6 +700,8 @@ if __name__ == "__main__":
                         help="Batch size for speed benchmark")
     parser.add_argument("--speed-trials", type=int, default=50,
                         help="Number of trials per speed measurement")
+    parser.add_argument("--match-params", action="store_true",
+                        help="Scale model depths so all have ~same param count in speed bench")
 
     args = parser.parse_args()
     res_acc, res_spd = run_benchmark(args)
