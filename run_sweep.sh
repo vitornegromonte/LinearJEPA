@@ -1,14 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=linearjepa_synth
-#SBATCH --partition=short-simple
+#SBATCH --job-name=linearjepa_synth_sweep
+#SBATCH -p short-simple
 #SBATCH --mem=32G
 #SBATCH --ntasks=1
 #SBATCH -c 8
 #SBATCH --gres=gpu:1
-#SBATCH --nodes=9
-#SBATCH -o synth_%j.out
-#SBATCH -e synth_%j.err
-#SBATCH --time=04:00:00
+#SBATCH -0 job.log
+#SBATCH -w cluster-node8
+#SBATCH -o logs/%x_%j.out
+#SBATCH -e logs/%x_%j.err
+#SBATCH --time=08:00:00
 
 set -eo pipefail
 
@@ -20,35 +21,31 @@ echo " Data/Hora: $(date)"
 echo "==========================================="
 
 # ---------------------------
+# Ativar ambiente Python (Apuana)
+# ---------------------------
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate lewm_py310
+echo "🔧 Ambiente: $(which python)"
+
+# ---------------------------
+# Ir para o projeto
+# ---------------------------
+cd "$HOME/LinearJEPA" || { echo "❌ Diretório $HOME/LinearJEPA não encontrado"; exit 1; }
+echo "📁 Diretório: $(pwd)"
+
+# ---------------------------
 # Checar GPU
 # ---------------------------
-echo "🔍 Checando GPU..."
-if ! command -v nvidia-smi &> /dev/null; then
-    echo "nvidia-smi não encontrado — CPU only."
-else
-    nvidia-smi || echo "Falha ao listar GPUs."
-fi
-
-# ---------------------------
-# Ativar ambiente
-# ---------------------------
-echo "📁 Diretório de trabalho: $(pwd)"
-
-if [ -d ".venv" ]; then
-    source .venv/bin/activate
-    echo "🔧 Ambiente venv ativado: $(which python)"
-else
-    echo "⚠️  Nenhum .venv encontrado — usando python padrão"
-fi
+echo "🔍 GPU:"
+nvidia-smi || echo "Falha ao listar GPUs."
 
 # ---------------------------
 # Confirmar PyTorch + CUDA
 # ---------------------------
-echo "🔎 Verificando PyTorch e CUDA..."
+echo "🔎 PyTorch:"
 python3 - <<'EOF'
 import torch, sys
 print(f"Torch: {torch.__version__}")
-print(f"Python: {sys.executable}")
 print(f"CUDA: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -56,6 +53,7 @@ if torch.cuda.is_available():
 EOF
 
 export CUDA_VISIBLE_DEVICES=0
+
 TASKS="linear_ar,nback,delayed_copy,slowfast,chaotic"
 MODELS="lewm,lewm_deltanet,lewm_mamba"
 EPISODES=200
@@ -77,8 +75,6 @@ echo ""
 echo "==========================================="
 echo " 2. Step-generalization benchmark"
 echo "==========================================="
-echo "Tarefas: $TASKS"
-echo "Modelos: $MODELS"
 
 python bench_generalization.py \
     --task "$TASKS" \
@@ -90,7 +86,7 @@ python bench_generalization.py \
 
 echo ""
 echo "==========================================="
-echo " 3. Speed benchmark (all tasks, fair params)"
+echo " 3. Speed benchmark (fair params)"
 echo "==========================================="
 
 python bench_generalization.py \
