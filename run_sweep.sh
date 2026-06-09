@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH -c 8
 #SBATCH --gres=gpu:1
-#SBATCH -0 job.log
+#SBATCH -o job.log
 #SBATCH -w cluster-node8
 #SBATCH -o logs/%x_%j.out
 #SBATCH -e logs/%x_%j.err
