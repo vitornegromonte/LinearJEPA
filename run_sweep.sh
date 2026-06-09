@@ -1,17 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name=lewm_sweep
+#SBATCH --job-name=linearjepa_synth
+#SBATCH --partition=short-simple
 #SBATCH --mem=32G
 #SBATCH --ntasks=1
 #SBATCH -c 8
 #SBATCH --gres=gpu:1
-#SBATCH -o sweep_%j.out
-#SBATCH -e sweep_%j.err
+#SBATCH --nodes=9
+#SBATCH -o synth_%j.out
+#SBATCH -e synth_%j.err
 #SBATCH --time=04:00:00
 
 set -eo pipefail
 
 echo "==========================================="
-echo " LeWM Hyperparameter Sweep"
+echo " LinearJEPA — Synthetic Dataset Pipeline"
 echo " Nó: $(hostname)"
 echo " Usuário: $USER"
 echo " Data/Hora: $(date)"
@@ -28,7 +30,7 @@ else
 fi
 
 # ---------------------------
-# Ativar ambiente (venv)
+# Ativar ambiente
 # ---------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -56,51 +58,56 @@ print(f"CUDA: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"Mem: {torch.cuda.get_device_properties(0).total_memory/1024**3:.1f} GB")
-from module import DeltaNetAttention
-d = DeltaNetAttention(192, heads=8, dim_head=64)
-print(f"DeltaNet otimizado: {d._use_optimized}")
 EOF
 
-echo ""
-echo "==========================================="
-echo " 1. Speed benchmark (L1)"
-echo "==========================================="
 export CUDA_VISIBLE_DEVICES=0
-
-python bench_hparam_sweep.py \
-    --model lewm,lewm_deltanet,lewm_mamba \
-    --fidelity L1 \
-    --n-samples 200 \
-    --batch-size 32 \
-    --speed-trials 100 \
-    --out results/sweep_speed \
-    || { echo "⚠️  L1 sweep falhou"; exit 1; }
+TASKS="linear_ar,nback,delayed_copy,slowfast,chaotic"
+MODELS="lewm,lewm_deltanet,lewm_mamba"
+EPISODES=200
+STEPS=2000
+SEEDS=3
 
 echo ""
 echo "==========================================="
-echo " 2. Pareto analysis (speed × params)"
+echo " 1. Gerando datasets sintéticos"
 echo "==========================================="
-python bench_hparam_sweep.py \
-    --analyze results/sweep_speed_L1.csv \
-    --out results/pareto_speed.csv \
-    || echo "⚠️  Análise Pareto falhou"
+
+for task in linear_ar nback delayed_copy slowfast chaotic; do
+    echo "--- $task ---"
+    python synth_data.py --task "$task" --modality state \
+        --num-episodes $EPISODES --ep-len 128
+done
 
 echo ""
 echo "==========================================="
-echo " 3. Full L2 sweep (train + quality)"
+echo " 2. Step-generalization benchmark"
 echo "==========================================="
-python bench_hparam_sweep.py \
-    --model lewm,lewm_deltanet,lewm_mamba \
-    --fidelity L2 \
-    --n-samples 100 \
-    --task linear_ar \
-    --episodes 250 \
-    --train-steps 500 \
-    --seeds 3 \
-    --batch-size 32 \
-    --speed-trials 50 \
-    --out results/sweep_full \
-    || echo "⚠️  L2 sweep falhou"
+echo "Tarefas: $TASKS"
+echo "Modelos: $MODELS"
+
+python bench_generalization.py \
+    --task "$TASKS" \
+    --modality state \
+    --models "$MODELS" \
+    --episodes $EPISODES --steps $STEPS --seeds $SEEDS \
+    --out results/benchmark.csv \
+    || echo "⚠️  Benchmark falhou"
+
+echo ""
+echo "==========================================="
+echo " 3. Speed benchmark (all tasks, fair params)"
+echo "==========================================="
+
+python bench_generalization.py \
+    --task "$TASKS" \
+    --modality state \
+    --models "$MODELS" \
+    --episodes $EPISODES --steps $STEPS --seeds $SEEDS \
+    --bench-speed --match-params \
+    --speed-lens 16,32,64,128,256 \
+    --batch-size 128 --speed-trials 100 \
+    --out results/benchmark_speed.csv \
+    || echo "⚠️  Speed benchmark falhou"
 
 echo ""
 echo "==========================================="
