@@ -5,26 +5,31 @@
 # the code falls back to pure-PyTorch implementations (correct,
 # but significantly slower on GPU).
 #
-# Install (note: --no-build-isolation is required so pip uses
-# the installed GPU PyTorch instead of an isolated torch-cpu):
+# IMPORTANT: All three require a CUDA toolkit (nvcc) that matches
+# your PyTorch build. If any fail to install, skip them — the code
+# will still run correctly using fallback implementations.
+#
+# Install:
 #     pip install --no-build-isolation -r requirements-cuda.txt
 #
-# Notes:
-# - mamba-ssm requires `nvcc` on the system. Colab ships with it.
-# - The build is usually fast on Colab because mamba-ssm auto-
-#   downloads a pre-built wheel from GitHub Releases via its
-#   `CachedWheelsCommand` mechanism.
+# If mamba-ssm or causal-conv1d fail due to CUDA version mismatch,
+# install just flash-linear-attention (the most portable one):
+#     pip install --no-build-isolation flash-linear-attention
 # ------------------------------------------------------------
 
-# Mamba SSM (state-space model CUDA kernels)
-causal-conv1d>=1.4.0
-mamba-ssm
-
 # Flash Linear Attention (linear attention CUDA kernels,
-# includes DeltaNet — fla.layers.DeltaNet)
+# includes DeltaNet — fla.layers.DeltaNet).
+# This is the most portable of the three and provides the
+# biggest speedup for DeltaNetConditionalBlock.
 #
 # Versions >= 0.3.2 require PyTorch >= 2.7 + Triton >= 3.3.
 # If install fails with a "torch >= 2.7 required" build error,
 # pin an older version:
 #     pip install --no-build-isolation flash-linear-attention==0.2.2
 flash-linear-attention
+
+# Mamba SSM — optional. Skip if it fails to compile; the
+# pure-PyTorch fallback in module.py will be used instead.
+# causal-conv1d>=1.4.0
+# mamba-ssm
+
