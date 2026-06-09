@@ -300,7 +300,7 @@ class DeltaNetAttention(nn.Module):
             from fla.layers import DeltaNet as _DeltaNet
             self.delta = _DeltaNet(d_model=dim, n_head=heads, head_dim=dim_head)
             self._use_optimized = True
-        except ImportError:
+        except Exception:
             pass
 
         if not self._use_optimized:
