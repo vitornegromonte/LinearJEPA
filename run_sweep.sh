@@ -32,18 +32,13 @@ fi
 # ---------------------------
 # Ativar ambiente
 # ---------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+echo "📁 Diretório de trabalho: $(pwd)"
 
 if [ -d ".venv" ]; then
     source .venv/bin/activate
     echo "🔧 Ambiente venv ativado: $(which python)"
-elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-    conda activate lewm || { echo "❌ Falha ao ativar conda env"; exit 1; }
-    echo "🔧 Ambiente Conda ativado: $(which python)"
 else
-    echo "⚠️  Nenhum ambiente Python encontrado, usando python padrão"
+    echo "⚠️  Nenhum .venv encontrado — usando python padrão"
 fi
 
 # ---------------------------
