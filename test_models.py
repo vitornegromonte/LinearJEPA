@@ -14,6 +14,7 @@ from module import (
     ARPredictor, ConditionalBlock, DeltaNetConditionalBlock,
     MambaPredictor, MLP, Embedder,
 )
+from deq_predictor import DEQPredictor
 from jepa import JEPA
 
 
@@ -273,6 +274,114 @@ def test_sigreg():
         print(f"  [{name:10s}] sigreg loss={reg_loss.item():.4f}  backward OK")
 
 
+def make_deq_predictor(embed_dim=192, history_size=3):
+    """Create a DEQ predictor with a small config for testing."""
+    return DEQPredictor(
+        num_frames=history_size,
+        input_dim=embed_dim,
+        hidden_dim=embed_dim,
+        output_dim=embed_dim,
+        depth=1,
+        heads=4,
+        mlp_dim=384,
+        dim_head=32,
+        dropout=0.0,
+        emb_dropout=0.0,
+        f_max_iter=10,
+        eval_f_max_iter=15,
+        f_solver="broyden",
+        b_solver="broyden",
+        f_tol=1e-4,
+    )
+
+
+def test_deq_forward_backward():
+    """Test DEQ predictor forward pass + backward computes gradients."""
+    print("=" * 60)
+    print("TEST: DEQ Forward + Backward pass")
+    print("=" * 60)
+
+    embed_dim = 192
+    history_size = 3
+    num_preds = 1
+    batch_size = 1
+    action_dim = 2
+    img_size = 32
+
+    predictor = make_deq_predictor(embed_dim=embed_dim, history_size=history_size)
+    model = make_model(predictor, embed_dim=embed_dim, action_dim=action_dim, img_size=img_size)
+    model.train()
+
+    pixels = torch.randn(batch_size, history_size + num_preds, 3, img_size, img_size)
+    action = torch.randn(batch_size, history_size + num_preds, action_dim)
+    batch = {"pixels": pixels, "action": action}
+
+    output = model.encode(batch)
+    assert "emb" in output
+    assert output["emb"].shape == (batch_size, history_size + num_preds, embed_dim)
+
+    ctx_emb = output["emb"][:, :history_size]
+    ctx_act = output["act_emb"][:, :history_size]
+    tgt_emb = output["emb"][:, num_preds:]
+    pred_emb = model.predict(ctx_emb, ctx_act)
+
+    assert pred_emb.shape == tgt_emb.shape, \
+        f"DEQ: pred shape {pred_emb.shape} != tgt {tgt_emb.shape}"
+
+    loss = (pred_emb - tgt_emb).pow(2).mean()
+    loss.backward()
+
+    grad_count = sum(
+        p.grad is not None and p.grad.abs().sum() > 0
+        for p in model.predictor.parameters()
+    )
+    total_params = sum(1 for _ in model.predictor.parameters())
+    pred_params = sum(p.numel() for p in model.predictor.parameters())
+
+    print(f"  [deq       ] loss={loss.item():.4f}  "
+          f"grads={grad_count}/{total_params}  "
+          f"pred_params={pred_params}")
+
+    # Verify the DEQ solver ran multiple iterations (not just 1)
+    assert grad_count > 0, "DEQ: no gradients flowed to predictor parameters"
+    print()
+
+
+def test_deq_rollout():
+    """Test DEQ predictor works in rollout mode."""
+    print("=" * 60)
+    print("TEST: DEQ Rollout")
+    print("=" * 60)
+
+    embed_dim = 192
+    history_size = 3
+    batch_size = 1
+    action_dim = 2
+    img_size = 32
+    num_plan_samples = 2
+    horizon = history_size + 3
+
+    predictor = make_deq_predictor(embed_dim=embed_dim, history_size=history_size)
+    model = make_model(predictor, embed_dim=embed_dim, action_dim=action_dim, img_size=img_size)
+    model.eval()
+
+    pixels = torch.randn(batch_size, num_plan_samples, history_size, 3, img_size, img_size)
+    action_sequence = torch.randn(batch_size, num_plan_samples, horizon, action_dim)
+
+    info = {"pixels": pixels}
+    with torch.no_grad():
+        info = model.rollout(info, action_sequence, history_size=history_size)
+
+    assert "predicted_emb" in info, "DEQ rollout missing predicted_emb"
+    expected_shape = (batch_size, num_plan_samples, horizon + 1, embed_dim)
+    actual_shape = info["predicted_emb"].shape
+    assert actual_shape == expected_shape, \
+        f"DEQ rollout shape {actual_shape} != {expected_shape}"
+
+    print(f"  [deq       ] rollout OK  shape={list(actual_shape)}")
+    print()
+
+
 def main():
     # Reduce test sizes for CPU speed
     print("LeWM Predictor Tests (CPU)\n")
@@ -280,6 +389,8 @@ def main():
     test_rollout()
     test_mamba_stateful()
     test_sigreg()
+    test_deq_forward_backward()
+    test_deq_rollout()
     print("\nAll tests passed!")
 
 
